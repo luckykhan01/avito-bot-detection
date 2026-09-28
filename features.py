@@ -162,12 +162,38 @@ def ua_features(ev: pd.DataFrame) -> pd.DataFrame:
     })
 
 
-def build_features(events_clean: pd.DataFrame, meta: pd.DataFrame, with_ua: bool = False) -> pd.DataFrame:
+def item_popularity_features(events_clean: pd.DataFrame, meta_all: pd.DataFrame,
+                             lookback_days: int = 7) -> pd.DataFrame:
+    ev = events_in_window(events_clean, meta_all).merge(
+        meta_all[["cookie_id", "window_start_ts"]], on="cookie_id")
+    views = ev.dropna(subset=["item_id"]).drop_duplicates(["cookie_id", "item_id"])
+    views = views[["cookie_id", "item_id", "window_start_ts"]]
+
+    per_day = views.groupby(["item_id", "window_start_ts"]).size().unstack(fill_value=0)
+    per_day = per_day.T.asfreq("D", fill_value=0)
+    rolling = per_day.rolling(lookback_days, min_periods=1).sum().T.stack().rename("pop")
+
+    views = views.join(rolling, on=["item_id", "window_start_ts"])
+    views["pop"] -= 1
+    g = views.groupby("cookie_id")["pop"]
+    f = pd.DataFrame({
+        "item_pop_mean": g.mean(),
+        "item_pop_zero_share": g.apply(lambda p: (p == 0).mean()),
+    })
+    day = meta_all.set_index("cookie_id").window_start_ts.reindex(f.index)
+    f["item_pop_mean_rel"] = f.item_pop_mean / f.item_pop_mean.groupby(day).transform("mean")
+    return f
+
+
+def build_features(events_clean: pd.DataFrame, meta: pd.DataFrame, with_ua: bool = False,
+                   popularity: pd.DataFrame | None = None) -> pd.DataFrame:
     ev = events_in_window(events_clean, meta)
     blocks = [activity_features(ev), timing_features(ev), diversity_features(ev),
               pointer_features(ev), meta_features(meta, ev)]
     if with_ua:
         blocks.append(ua_features(ev))
+    if popularity is not None:
+        blocks.append(popularity)
     f = pd.concat(blocks, axis=1)
     f = meta[["cookie_id"]].merge(f, left_on="cookie_id", right_index=True, how="left")
     f["n_events"] = f["n_events"].fillna(0)
